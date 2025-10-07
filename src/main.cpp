@@ -1,7 +1,11 @@
 #include <iostream>
 
-int main() {
-    
+#include <parser/parser.h>
 
+int main() {
+    core::Parser parser;
+
+    
+    
     return 0;
 }
