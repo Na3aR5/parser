@@ -17,10 +17,10 @@ int main() {
         else if (strcmp(command.c_str(), "-eval") == 0) {
             command.clear();
             std::getline(std::cin, command);
-            std::cout << "Result: " << parser.Evaluate(command.c_str()) << '\n';
+            std::cout << "Result: " << parser.Evaluate(command.c_str()) << "\n\n";
         }
         else {
-            std::cout << "Unknown command\n";
+            std::cout << "Unknown command\n\n";
         }
 
         command.clear();

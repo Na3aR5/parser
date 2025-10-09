@@ -8,8 +8,6 @@
 #include <vector>
 #include <map>
 
-#include <iostream>
-
 namespace core {
     class ParserBase {
     public:
@@ -20,10 +18,10 @@ namespace core {
 
         public:
             static Integer StringToInteger(const std::string& s);
-            static Integer StringToInteger(const std::string& s, size_t begin, size_t end);
+            static Real    StringToReal(const std::string& s);
 
-            static Real StringToReal(const std::string& s);
-            static Real StringToReal(const std::string& s, size_t begin, size_t end);
+        public:
+            static Real(*s_SqrtFunction)(Real);
         };
 
         enum class ExpressionError {
@@ -46,11 +44,14 @@ namespace core {
                 OPERATOR = 0x10,
                 FUNCTION = 0x20,
 
-                UNARY    = 0x40,
-                BINARY   = 0x80,
-                INTEGER  = 0x100,
+                UNARY     = 0x40,
+                BINARY    = 0x80,
+                INTEGER   = 0x100,
+                EOEX_LIKE = 0x200, 
 
-                RIGHT_TO_LEFT = 0x200
+                RIGHT_TO_LEFT = 0x400,
+
+                ANY_ARG_COUNT = 0x800
             };
 
             enum ID : uint64_t {
@@ -64,15 +65,24 @@ namespace core {
 
                 OPEN_PAREN,
                 CLOSE_PAREN,
+                COMMA,
 
                 SQRT,
+            };
 
-                ID_BITSHIFT = 10,
-                ID_BITMASK  = (1ull << 16) - 1,
+            enum {
+                ID_BITS     = 8,
+                ID_BITSHIFT = 12,
+                ID_BITMASK  = (1ull << ID_BITS) - 1,
                 
                 BINDING_POWER_BITS = 8,
                 BINDING_POWER_BITMASK  = (1ull << BINDING_POWER_BITS) - 1,
-                BINDING_POWER_BITSHIFT = ID_BITSHIFT + (BINDING_POWER_BITS << 1),
+                BINDING_POWER_BITSHIFT = ID_BITSHIFT + ID_BITS,
+
+                FUNCTION_ARGS_BITS = (sizeof(uint64_t) << 3) -
+                    ID_BITSHIFT - ID_BITS - (BINDING_POWER_BITS << 1),
+                FUNCTION_ARGS_BITSHIFT = (sizeof(uint64_t) << 3) - FUNCTION_ARGS_BITS,
+                FUNCTION_ARGS_BITMASK  = (1ull << FUNCTION_ARGS_BITS) - 1
             };
 
         public:
@@ -116,32 +126,29 @@ namespace core {
             uint8_t GetBP2() const noexcept;
 
             ID GetID() const noexcept;
+            size_t GetFunctionArgCount() const noexcept;
 
         public:
             void SetBP(uint8_t bp) noexcept;
 
         public:
+            // First 11 bits for type
+            // Next 8 bits for ID
+            // Next 16 bits for BP1 and BP2
+            // 
             uint64_t              info = 0;
+
             std::unique_ptr<Data> data;
         };
 
     public:
-        static uint64_t CreateFunctionTokenInfo(Token::ID id, uint8_t bp = 0, uint8_t bp2 = 0) noexcept;
+        static uint64_t CreateFunctionTokenInfo(Token::ID id, size_t argCount) noexcept;
         static uint64_t CreateOperatorTokenInfo(Token::ID id, uint8_t bp = 0, uint8_t bp2 = 0) noexcept;
 
     protected:
-        struct _FunctionDetails {
-        public:
-            _FunctionDetails() = default;
-            _FunctionDetails(uint64_t info) : info(info) {}
-
-        public:
-            uint64_t info = 0;
-        };
-
-        static std::map<std::string, _FunctionDetails> s_FunctionMap;
-        static std::map<char, _FunctionDetails>        s_OperatorMap;
-        static std::map<char, uint64_t>                s_SupportedSymbolMap;
+        static std::map<std::string, uint64_t> s_FunctionMap;
+        static std::map<char, uint64_t>        s_OperatorMap;
+        static std::map<char, uint64_t>        s_SupportedSymbolMap;
     };
 
     template <typename Traits = ParserBase::DefaultTraits>
@@ -187,14 +194,7 @@ namespace core {
 
                 auto opIt = s_OperatorMap.find(expression[i]);
                 if (opIt != s_OperatorMap.cend()) { // operator
-                    const _FunctionDetails& opDetails = opIt->second;
-                    Token opToken(
-                        opDetails.info,
-                        std::unique_ptr<Token::Data>(
-                            std::make_unique<Token::SpecifiedData<_FunctionDetails>>(opDetails).release()
-                        )
-                    );
-                    result.emplace_back(std::move(opToken));
+                    result.emplace_back(opIt->second);
                     ++i;
                     continue;
                 }
@@ -210,7 +210,7 @@ namespace core {
                 break;
             }
             
-            result.emplace_back(Token::EOEX);
+            result.emplace_back(Token::EOEX | Token::EOEX_LIKE);
             return result;
         };
 
@@ -219,7 +219,7 @@ namespace core {
         std::vector<std::pair<size_t, Token>> Specify(std::vector<Token>& tokens) const {
             Token emptyToken(0);
             Token* prevToken = &emptyToken;
-            const _FunctionDetails& multiplicationDetails = s_OperatorMap['*'];
+            uint64_t multiplicationInfo = s_OperatorMap['*'];
 
             std::vector<std::pair<size_t, Token>> implicitTokens;
             
@@ -239,11 +239,7 @@ namespace core {
                 }
                 // Implicit multiplication first case (operand before '(')
                 else if (token.Is(Token::OPEN_PAREN) && isLeftOperand) {
-                    implicitTokens.emplace_back(i, Token(multiplicationDetails.info,
-                        std::unique_ptr<Token::Data>(
-                            std::make_unique<Token::SpecifiedData<_FunctionDetails>>(multiplicationDetails).release()
-                        )
-                    ));
+                    implicitTokens.emplace_back(i, Token(multiplicationInfo));
                 }
                 // Implicit multiplication second case (number before constant, and vice versa)
                 else if (token.HasType(Token::NUMBER) && isLeftOperand) {
@@ -253,20 +249,12 @@ namespace core {
 
                     // Non-constant before constant or non-number before number
                     if (condition) {
-                        implicitTokens.emplace_back(i, Token(multiplicationDetails.info,
-                            std::unique_ptr<Token::Data>(
-                                std::make_unique<Token::SpecifiedData<_FunctionDetails>>(multiplicationDetails).release()
-                            )
-                        ));
+                        implicitTokens.emplace_back(i, Token(multiplicationInfo));
                     }
                 }
                 // Implicit multiplication third case (operand before function)
                 else if (token.HasType(Token::FUNCTION) && isLeftOperand) {
-                    implicitTokens.emplace_back(i, Token(multiplicationDetails.info,
-                        std::unique_ptr<Token::Data>(
-                            std::make_unique<Token::SpecifiedData<_FunctionDetails>>(multiplicationDetails).release()
-                        )
-                    ));
+                    implicitTokens.emplace_back(i, Token(multiplicationInfo));
                 }
 
                 prevToken = &token;
@@ -352,10 +340,7 @@ namespace core {
             }
 
             std::string numberString(e + left, e + i);
-
-            return Token(info, std::unique_ptr<Token::Data>(
-                std::make_unique<Token::SpecifiedData<std::string>>(std::move(numberString)).release()
-            ));
+            return Token(info, std::make_unique<Token::SpecifiedData<std::string>>(std::move(numberString)));
         }
 
         Token _ParseID(const char* e, size_t& i) const {
@@ -370,18 +355,13 @@ namespace core {
             if (constIt != m_constantMap.cend()) {
                 return Token(
                     info | Token::NUMBER | Token::CONSTANT & ~(Token::SYMBOL),
-                    std::unique_ptr<Token::Data>(
-                        std::make_unique<Token::SpecifiedData<Real>>(constIt->second).release()
-                    )
+                    std::make_unique<Token::SpecifiedData<Real>>(constIt->second)
                 );
             }
 
             auto funcIt = s_FunctionMap.find(idString);
             if (funcIt != s_FunctionMap.cend()) {
-                const _FunctionDetails& funcDetails = funcIt->second;
-                return Token(funcDetails.info, std::unique_ptr<Token::Data>(
-                    std::make_unique<Token::SpecifiedData<_FunctionDetails>>(funcDetails).release()
-                ));
+                return Token(funcIt->second);
             }
 
             return Token();
@@ -444,6 +424,23 @@ namespace core {
             Real(*func)(const Real&, const Real&) = nullptr;
         };
 
+        struct _FunctionNode : _ExprNode {
+        public:
+            _FunctionNode() = default;
+            _FunctionNode(
+                Real(*func)(const std::vector<std::unique_ptr<_ExprNode>>&),
+                std::vector<std::unique_ptr<_ExprNode>>&& args
+            ) : args(std::move(args)), func(func) {};
+
+            virtual Real Evaluate() const override {
+                return func(args);
+            }
+            
+        public:
+            std::vector<std::unique_ptr<_ExprNode>> args;
+            Real(*func)(const std::vector<std::unique_ptr<_ExprNode>>&) = nullptr;
+        };
+
     private:
         class _Builder {
         public:
@@ -458,15 +455,15 @@ namespace core {
                 const Token* token = _Advance();
                 std::unique_ptr<_ExprNode> left = _Nud(token);
                 
-                token = _Advance();
-                while (token && !token->Is(Token::EOEX) && rbp < token->GetBP()) {
+                token = _Get();
+                while (token && !token->Is(Token::EOEX) && !token->Is(Token::CLOSE_PAREN)
+                        && rbp < token->GetBP()) {
+                    _Advance();
                     left = _Led(token, std::move(left));
-                    token = _Advance();
+                    token = _Get();
                 }
 
                 return std::move(left);
-
-                return std::unique_ptr<_ExprNode>();
             };
 
             void Reset(
@@ -500,6 +497,17 @@ namespace core {
                 }
                 return nullptr;
             }
+
+            const Token* _Get() const {
+                if (m_implicitIndex < m_implicitTokens->size() &&
+                    (*m_implicitTokens)[m_implicitIndex].first == m_index) {
+                    return &((*m_implicitTokens)[m_implicitIndex].second);
+                }
+                if (m_index < m_tokens->size()) {
+                    return &((*m_tokens)[m_index]);
+                }
+                return nullptr;
+            }
             
             // Null denotation (begin of the subexpression)
             std::unique_ptr<_ExprNode> _Nud(const Token* token) {
@@ -517,10 +525,7 @@ namespace core {
                 }
                 if (token->Is(Token::OPEN_PAREN)) {
                     std::unique_ptr<_ExprNode> expr = Build(0);
-                    const Token* next = _Peek();
-                    if (next && next->Is(Token::CLOSE_PAREN)) {
-                        _Advance();
-                    }
+                    _Advance(); // assuming that each open paren has it's own close paren
                     return std::move(expr);
                 }
                 if (token->HasType(Token::UNARY)) {
@@ -530,6 +535,32 @@ namespace core {
                         std::move(expr)
                     );
                 }
+                if (token->HasType(Token::FUNCTION)) {
+                    size_t argCount = token->GetFunctionArgCount();
+
+                    {
+                        const Token* next = _Get();
+                        if (next && next->Is(Token::OPEN_PAREN)) {
+                            _Advance(); // skip open paren right after function
+                        }
+                        else {
+                            // call without parentheses for functions with 1 arg (in future)
+                        }
+                    }
+                    std::vector<std::unique_ptr<_ExprNode>> args;
+                    args.reserve(argCount);
+                    
+                    for (size_t i = 0; i < argCount; ++i) {
+                        args.emplace_back(Build(0));
+                        _Advance(); // skipping commas, and ')' at the end
+                    }
+                    return std::make_unique<_FunctionNode>(
+                        m_functionMap[token->GetID()],
+                        std::move(args)
+                    );
+                }
+
+                // Disable warning
                 return std::unique_ptr<_ExprNode>();
             }
 
@@ -543,6 +574,8 @@ namespace core {
                         std::move(expr)
                     );
                 }
+
+                // Disable warning
                 return std::unique_ptr<_ExprNode>();
             };
 
@@ -555,6 +588,10 @@ namespace core {
             static Real _Multiply(const Real& x, const Real& y) { return x * y; }
             static Real _Divide  (const Real& x, const Real& y) { return x / y; }
 
+            static Real _Sqrt(const std::vector<std::unique_ptr<_ExprNode>>& args) {
+                return Traits::s_SqrtFunction(args[0]->Evaluate());
+            }
+
         private:
             size_t                                       m_index          = 0ull;
             size_t                                       m_implicitIndex  = 0ull;
@@ -562,7 +599,7 @@ namespace core {
             const std::vector<std::pair<size_t, Token>>* m_implicitTokens = nullptr;
 
             std::map<Token::ID, Real(*)(const Real&)> m_unaryFunctionMap = {
-                { Token::PLUS, _UnaryPlus },
+                { Token::PLUS,  _UnaryPlus },
                 { Token::MINUS, _UnaryMinus }
             };
 
@@ -571,6 +608,10 @@ namespace core {
                 { Token::MINUS,    _Minus },
                 { Token::ASTERISK, _Multiply },
                 { Token::SLASH,    _Divide }
+            };
+
+            std::map<Token::ID, Real(*)(const std::vector<std::unique_ptr<_ExprNode>>&)> m_functionMap = {
+                { Token::SQRT, _Sqrt }
             };
         };
 

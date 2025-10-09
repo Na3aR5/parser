@@ -1,33 +1,19 @@
 #include <parser/parser.h>
 
+#include <cmath>
+
+using DefaultTraitsReal = typename core::ParserBase::DefaultTraits::Real;
+
+DefaultTraitsReal(*core::ParserBase::DefaultTraits::s_SqrtFunction)(DefaultTraitsReal) = std::sqrt;
+
 core::ParserBase::DefaultTraits::Integer core::ParserBase::DefaultTraits::StringToInteger(
 const std::string& s) {
     return std::stol(s);
 }
 
-core::ParserBase::DefaultTraits::Integer core::ParserBase::DefaultTraits::StringToInteger(
-const std::string& s, size_t begin, size_t end) {
-    Integer result = 0;
-    Integer m = 1;
-
-    while (begin < end) {
-        result *= m;
-        result += (Integer)(s[begin] - '0');
-        m *= 10;
-        ++begin;
-    }
-
-    return result;
-}
-
-core::ParserBase::DefaultTraits::Real core::ParserBase::DefaultTraits::StringToReal(
+DefaultTraitsReal core::ParserBase::DefaultTraits::StringToReal(
 const std::string& s) {
     return std::stod(s);
-}
-
-core::ParserBase::DefaultTraits::Real core::ParserBase::DefaultTraits::StringToReal(
-const std::string& s, size_t begin, size_t end) {
-    return std::stod(s.substr(begin, end - begin));
 }
 
 bool core::ParserBase::Token::HasType(uint64_t type) const noexcept {
@@ -50,14 +36,18 @@ core::ParserBase::Token::ID core::ParserBase::Token::GetID() const noexcept {
     return (ID)((info >> ID_BITSHIFT) & ID_BITMASK);
 }
 
+size_t core::ParserBase::Token::GetFunctionArgCount() const noexcept {
+    return (info >> FUNCTION_ARGS_BITSHIFT) & FUNCTION_ARGS_BITMASK;
+}
+
 void core::ParserBase::Token::SetBP(uint8_t bp) noexcept {
     info &= ~(BINDING_POWER_BITMASK << BINDING_POWER_BITSHIFT);
     info |= (uint64_t)bp << BINDING_POWER_BITSHIFT;
 }
 
-uint64_t core::ParserBase::CreateFunctionTokenInfo(Token::ID id, uint8_t bp, uint8_t bp2) noexcept {
+uint64_t core::ParserBase::CreateFunctionTokenInfo(Token::ID id, size_t argCount) noexcept {
     return Token::FUNCTION | Token::SYMBOL | (id << Token::ID_BITSHIFT) |
-        ((((uint64_t)bp2 << Token::BINDING_POWER_BITS) | bp) << Token::BINDING_POWER_BITSHIFT);
+        ((30) << Token::BINDING_POWER_BITSHIFT) | (argCount << Token::FUNCTION_ARGS_BITSHIFT);
 }
 
 uint64_t core::ParserBase::CreateOperatorTokenInfo(Token::ID id, uint8_t bp, uint8_t bp2) noexcept {
@@ -65,26 +55,19 @@ uint64_t core::ParserBase::CreateOperatorTokenInfo(Token::ID id, uint8_t bp, uin
         ((((uint64_t)bp2 << Token::BINDING_POWER_BITS) | bp) << Token::BINDING_POWER_BITSHIFT);
 }
 
-std::map<std::string, core::ParserBase::_FunctionDetails> core::ParserBase::s_FunctionMap = {
-    { "sqrt", core::ParserBase::_FunctionDetails(CreateFunctionTokenInfo(Token::SQRT, 30)) }
+std::map<std::string, uint64_t> core::ParserBase::s_FunctionMap = {
+    { "sqrt", CreateFunctionTokenInfo(Token::SQRT, 1) }
 };
 
-std::map<char, core::ParserBase::_FunctionDetails> core::ParserBase::s_OperatorMap = {
-    { '+', core::ParserBase::_FunctionDetails(
-        CreateOperatorTokenInfo(Token::PLUS, 10, 15) | Token::BINARY | Token::UNARY)
-    },
-    { '-', core::ParserBase::_FunctionDetails(
-        CreateOperatorTokenInfo(Token::MINUS, 10, 15) | Token::BINARY | Token::UNARY)
-    },
-    { '*', core::ParserBase::_FunctionDetails(
-        CreateOperatorTokenInfo(Token::ASTERISK, 20) | Token::BINARY)
-    },
-    { '/', core::ParserBase::_FunctionDetails(
-        CreateOperatorTokenInfo(Token::SLASH, 20) | Token::BINARY)
-    },
+std::map<char, uint64_t> core::ParserBase::s_OperatorMap = {
+    { '+', CreateOperatorTokenInfo(Token::PLUS, 10, 15)  | Token::BINARY | Token::UNARY },
+    { '-', CreateOperatorTokenInfo(Token::MINUS, 10, 15) | Token::BINARY | Token::UNARY },
+    { '*', CreateOperatorTokenInfo(Token::ASTERISK, 20)  | Token::BINARY },
+    { '/', CreateOperatorTokenInfo(Token::SLASH, 20)     | Token::BINARY },
 };
 
 std::map<char, uint64_t> core::ParserBase::s_SupportedSymbolMap = {
     { '(', Token::SYMBOL | (Token::OPEN_PAREN  << Token::ID_BITSHIFT) },
-    { ')', Token::SYMBOL | (Token::CLOSE_PAREN << Token::ID_BITSHIFT) }
+    { ')', Token::SYMBOL | (Token::CLOSE_PAREN << Token::ID_BITSHIFT) | Token::EOEX_LIKE },
+    { ',', Token::SYMBOL | (Token::COMMA       << Token::ID_BITSHIFT) | Token::EOEX_LIKE }
 };
