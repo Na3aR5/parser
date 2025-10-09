@@ -55,7 +55,7 @@ namespace core {
 
             enum ID : uint64_t {
                 // End of Expression
-                EOEX,
+                EOEX = 1,
 
                 PLUS,
                 MINUS,
@@ -294,8 +294,9 @@ namespace core {
                 }
 
                 // Number before number, or constant before constant
-                if (token.HasType(Token::NUMBER | Token::CONSTANT) !=
-                    prevToken->HasType(Token::NUMBER | Token::CONSTANT)) {
+                if ((token.HasType(Token::CONSTANT) && prevToken->HasType(Token::CONSTANT)) ||
+                    (token.HasType(Token::NUMBER) && !token.HasType(Token::CONSTANT) &&
+                    prevToken->HasType(Token::NUMBER) && !prevToken->HasType(Token::CONSTANT))) {
                     return ExpressionError::TWO_CONSECUTIVE_NUMBERS;
                 }
                 
@@ -325,7 +326,7 @@ namespace core {
             std::vector<std::pair<size_t, Token>> implicitTokens = Specify(tokens);
 
             if (Validate(tokens) != ExpressionError::IS_VALID) {
-                // error
+                // error;
                 return 0.0;
             }
             m_builder.Reset(&tokens, &implicitTokens);
@@ -460,12 +461,7 @@ namespace core {
                 token = _Advance();
                 while (token && !token->Is(Token::EOEX) && rbp < token->GetBP()) {
                     left = _Led(token, std::move(left));
-                    if (token->Is(Token::CLOSE_PAREN)) {
-                        token = _Advance();
-                    }
-                    else {
-                        token = _Get();
-                    }
+                    token = _Advance();
                 }
 
                 return std::move(left);
@@ -504,20 +500,14 @@ namespace core {
                 }
                 return nullptr;
             }
-
-            const Token* _Get() {
-                if (m_implicitIndex < m_implicitTokens->size() &&
-                    (*m_implicitTokens)[m_implicitIndex].first == m_index - 1) {
-                    return &((*m_implicitTokens)[m_implicitIndex++].second);
-                }
-                if (m_index - 1 < m_tokens->size()) {
-                    return &((*m_tokens)[m_index - 1]);
-                }
-                return nullptr;
-            }
             
             // Null denotation (begin of the subexpression)
             std::unique_ptr<_ExprNode> _Nud(const Token* token) {
+                if (token->HasType(Token::CONSTANT)) {
+                    return std::make_unique<_AtomNode<Real>>(
+                        ((Token::SpecifiedData<Real>*)token->data.get())->value
+                    );
+                }
                 if (token->HasType(Token::NUMBER)) {
                     const std::string& numberString = ((Token::SpecifiedData<std::string>*)token->data.get())->value;
                     if (token->HasType(Token::INTEGER)) {
@@ -527,7 +517,10 @@ namespace core {
                 }
                 if (token->Is(Token::OPEN_PAREN)) {
                     std::unique_ptr<_ExprNode> expr = Build(0);
-                    _Advance(); // here always will be ')' (if enabled "validation" layer (I'll fix later))
+                    const Token* next = _Peek();
+                    if (next && next->Is(Token::CLOSE_PAREN)) {
+                        _Advance();
+                    }
                     return std::move(expr);
                 }
                 if (token->HasType(Token::UNARY)) {
