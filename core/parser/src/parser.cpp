@@ -71,10 +71,10 @@ std::map<std::string, core::ParserBase::_FunctionDetails> core::ParserBase::s_Fu
 
 std::map<char, core::ParserBase::_FunctionDetails> core::ParserBase::s_OperatorMap = {
     { '+', core::ParserBase::_FunctionDetails(
-        CreateOperatorTokenInfo(Token::PLUS, 10, 25) | Token::BINARY | Token::UNARY)
+        CreateOperatorTokenInfo(Token::PLUS, 10, 15) | Token::BINARY | Token::UNARY)
     },
     { '-', core::ParserBase::_FunctionDetails(
-        CreateOperatorTokenInfo(Token::MINUS, 10, 25) | Token::BINARY | Token::UNARY)
+        CreateOperatorTokenInfo(Token::MINUS, 10, 15) | Token::BINARY | Token::UNARY)
     },
     { '*', core::ParserBase::_FunctionDetails(
         CreateOperatorTokenInfo(Token::ASTERISK, 20) | Token::BINARY)
