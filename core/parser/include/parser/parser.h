@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <functional>
 
 #include <string>
 #include <vector>
@@ -17,11 +18,22 @@ namespace core {
             using Real    = double;
 
         public:
+            DefaultTraits();
+
+        public:
             static Integer StringToInteger(const std::string& s);
             static Real    StringToReal(const std::string& s);
 
         public:
-            static Real(*s_SqrtFunction)(Real);
+            Real(*sqrtFunction)(Real);
+            Real(*powFunction)(Real, Real);
+
+            Real(*sinFunction)(Real);
+            Real(*cosFunction)(Real);
+            Real(*tanFunction)(Real);
+            Real(*cotFunction)(Real) = nullptr; // optional
+
+            Real(*lnFunction)(Real);
         };
 
         enum class ExpressionError {
@@ -30,6 +42,48 @@ namespace core {
             TWO_CONSECUTIVE_NUMBERS,
             INVALID_OPERATOR_POSITION,
             INVALID_PARENTHESES
+        };
+
+        template <typename T, typename ErrorT>
+        class Result {
+        public:
+            Result() : m_hasValue(false) {
+                ::new (&m_error) ErrorT();
+            }
+
+            Result(const T& value) : m_hasValue(true) {
+                ::new (&m_value) T(value);
+            }
+
+            Result(T&& value) : m_hasValue(true) {
+                ::new (&m_value) T(std::move(value));
+            }
+
+            Result(const ErrorT& error) : m_hasValue(false) {
+                ::new (&m_error) ErrorT(error);
+            }
+
+            ~Result() {
+                if (m_hasValue) {
+                    m_value.~T();
+                }
+                else {
+                    m_error.~ErrorT();
+                }
+            }
+
+        public:
+            bool         HasValue()  const noexcept { return m_hasValue; }
+            const T&     Get()       const noexcept { return m_value; }
+            const ErrorT Error()     const noexcept { return m_error; }
+
+        private:
+            union {
+                T      m_value;
+                ErrorT m_error;
+            };
+
+            bool m_hasValue;
         };
 
     public:
@@ -62,15 +116,26 @@ namespace core {
                 MINUS,
                 ASTERISK,
                 SLASH,
+                CARET,
 
                 OPEN_PAREN,
                 CLOSE_PAREN,
                 COMMA,
 
                 SQRT,
+                POW,
+                
+                SIN,
+                COS,
+                TAN,
+                COT,
+
+                LN,
+
+                AVG
             };
 
-            enum {
+            enum : uint64_t {
                 ID_BITS     = 8,
                 ID_BITSHIFT = 12,
                 ID_BITMASK  = (1ull << ID_BITS) - 1,
@@ -130,6 +195,7 @@ namespace core {
 
         public:
             void SetBP(uint8_t bp) noexcept;
+            void SetFunctionArgCount(size_t count) noexcept;
 
         public:
             // First 11 bits for type
@@ -214,12 +280,20 @@ namespace core {
             return result;
         };
 
-        // Specify operators (some operators depend on context) and add implicit tokens
+        // Specify operators (some operators depend on context) and function arg count, add implicit tokens, 
         // Return list of implicit tokens
         std::vector<std::pair<size_t, Token>> Specify(std::vector<Token>& tokens) const {
-            Token emptyToken(0);
-            Token* prevToken = &emptyToken;
+            Token    emptyToken(0);
+            Token*   prevToken          = &emptyToken;
             uint64_t multiplicationInfo = s_OperatorMap['*'];
+            
+            // open paren depth
+            size_t depth = 0;
+
+            size_t commas = 0;
+
+            Token* anyArgCountToken      = nullptr;
+            size_t anyArgCountTokenDepth = 0;
 
             std::vector<std::pair<size_t, Token>> implicitTokens;
             
@@ -229,17 +303,31 @@ namespace core {
 
                 bool isLeftOperand = prevToken->HasType(Token::NUMBER) || prevToken->Is(Token::CLOSE_PAREN);
 
+                if (token.Is(Token::COMMA)) {
+                    ++commas;
+                }
+                else if (token.Is(Token::CLOSE_PAREN)) {
+                    if (anyArgCountToken && anyArgCountTokenDepth == depth) {
+                        anyArgCountToken->SetFunctionArgCount(prevToken->Is(Token::OPEN_PAREN) ? 0 : commas + 1);
+                        commas = 0;
+                        anyArgCountToken = nullptr;
+                    }
+                    depth -= depth > 0;
+                }
                 // Binary/Unary operator
-                if (token.HasType(Token::BINARY | Token::UNARY)) {
+                else if (token.HasType(Token::BINARY | Token::UNARY)) {
                     // Binary, if has left operand, otherwise unary
                     token.info &= ~(isLeftOperand ? Token::UNARY : Token::BINARY);
                     if (!isLeftOperand) {
                         token.SetBP(token.GetBP2());
                     }
                 }
-                // Implicit multiplication first case (operand before '(')
-                else if (token.Is(Token::OPEN_PAREN) && isLeftOperand) {
-                    implicitTokens.emplace_back(i, Token(multiplicationInfo));
+                else if (token.Is(Token::OPEN_PAREN)) {
+                    ++depth;
+                    // Implicit multiplication first case (operand before '(')
+                    if (isLeftOperand) {
+                        implicitTokens.emplace_back(i, Token(multiplicationInfo));
+                    }
                 }
                 // Implicit multiplication second case (number before constant, and vice versa)
                 else if (token.HasType(Token::NUMBER) && isLeftOperand) {
@@ -252,9 +340,16 @@ namespace core {
                         implicitTokens.emplace_back(i, Token(multiplicationInfo));
                     }
                 }
-                // Implicit multiplication third case (operand before function)
-                else if (token.HasType(Token::FUNCTION) && isLeftOperand) {
-                    implicitTokens.emplace_back(i, Token(multiplicationInfo));
+                else if (token.HasType(Token::FUNCTION)) {
+                    // Implicit multiplication third case (operand before function)
+                    if (isLeftOperand) {
+                        implicitTokens.emplace_back(i, Token(multiplicationInfo));
+                    }
+
+                    if (token.HasType(Token::ANY_ARG_COUNT)) {
+                        anyArgCountToken      = &token;
+                        anyArgCountTokenDepth = depth + 1;
+                    }
                 }
 
                 prevToken = &token;
@@ -304,23 +399,25 @@ namespace core {
                 prevToken = &token;
             }
 
-            if (openParen > 0) return ExpressionError::INVALID_PARENTHESES;
+            if (openParen > 0) {
+                return ExpressionError::INVALID_PARENTHESES;
+            }
             
             return ExpressionError::IS_VALID;
         }
 
-        Real Evaluate(const char* expression) {
+        Result<Real, ExpressionError> Evaluate(const char* expression) {
             std::vector<Token> tokens = Tokenize(expression);
             std::vector<std::pair<size_t, Token>> implicitTokens = Specify(tokens);
 
-            if (Validate(tokens) != ExpressionError::IS_VALID) {
-                // error;
-                return 0.0;
+            ExpressionError validateResult = Validate(tokens);
+            if (validateResult != ExpressionError::IS_VALID) {
+                return Result<Real, ExpressionError>(validateResult);
             }
             m_builder.Reset(&tokens, &implicitTokens);
 
             std::unique_ptr<_ExprNode> root = m_builder.Build(0);
-            return root->Evaluate();
+            return Result<Real, ExpressionError>(root->Evaluate());
         };
 
     private:
@@ -409,7 +506,7 @@ namespace core {
         public:
             _BinaryNode() = default;
             _BinaryNode(
-                Real(*func)(const Real&, const Real&),
+                std::function<Real(const Real&, const Real&)> func,
                 std::unique_ptr<_ExprNode>&& left,
                 std::unique_ptr<_ExprNode>&& right
             ) : left(std::move(left)), right(std::move(right)), func(func) {}
@@ -421,14 +518,14 @@ namespace core {
         public:
             std::unique_ptr<_ExprNode> left;
             std::unique_ptr<_ExprNode> right;
-            Real(*func)(const Real&, const Real&) = nullptr;
+            std::function<Real(const Real&, const Real&)> func;
         };
 
         struct _FunctionNode : _ExprNode {
         public:
             _FunctionNode() = default;
             _FunctionNode(
-                Real(*func)(const std::vector<std::unique_ptr<_ExprNode>>&),
+                const std::function<Real(const std::vector<std::unique_ptr<_ExprNode>>&)>& func,
                 std::vector<std::unique_ptr<_ExprNode>>&& args
             ) : args(std::move(args)), func(func) {};
 
@@ -438,17 +535,19 @@ namespace core {
             
         public:
             std::vector<std::unique_ptr<_ExprNode>> args;
-            Real(*func)(const std::vector<std::unique_ptr<_ExprNode>>&) = nullptr;
+            std::function<Real(const std::vector<std::unique_ptr<_ExprNode>>&)> func;
         };
 
     private:
         class _Builder {
         public:
-            _Builder() = default;
+            _Builder() { _InitFunctions(); }
+            _Builder(const Traits& traits) : m_traits(&traits) { _InitFunctions(); }
+
             _Builder(
                 const std::vector<Token>* tokens,
                 const std::vector<std::pair<size_t, Token>>* implicitTokens
-            ) : m_tokens(tokens), m_implicitTokens(implicitTokens) {}
+            ) : m_tokens(tokens), m_implicitTokens(implicitTokens) { _InitFunctions(); }
 
         public:
             std::unique_ptr<_ExprNode> Build(uint8_t rbp) {
@@ -456,8 +555,7 @@ namespace core {
                 std::unique_ptr<_ExprNode> left = _Nud(token);
                 
                 token = _Get();
-                while (token && !token->Is(Token::EOEX) && !token->Is(Token::CLOSE_PAREN)
-                        && rbp < token->GetBP()) {
+                while (token && !token->HasType(Token::EOEX_LIKE) && rbp < token->GetBP()) {
                     _Advance();
                     left = _Led(token, std::move(left));
                     token = _Get();
@@ -555,7 +653,7 @@ namespace core {
                         _Advance(); // skipping commas, and ')' at the end
                     }
                     return std::make_unique<_FunctionNode>(
-                        m_functionMap[token->GetID()],
+                        _GetFunction(token->GetID()),
                         std::move(args)
                     );
                 }
@@ -580,21 +678,69 @@ namespace core {
             };
 
         private:
+            void _InitFunctions() {
+                m_binaryFunctionMap = {
+                    { Token::PLUS,     [](const Real& x, const Real& y) { return x + y; } },
+                    { Token::MINUS,    [](const Real& x, const Real& y) { return x - y; } },
+                    { Token::ASTERISK, [](const Real& x, const Real& y) { return x * y; } },
+                    { Token::SLASH,    [](const Real& x, const Real& y) { return x / y; } },
+
+                    { Token::CARET, [this](const Real& x, const Real& y) {
+                        return m_traits->powFunction(x, y);
+                    }}
+                };
+
+                m_functionMap = {
+                    [this](const std::vector<std::unique_ptr<_ExprNode>>& args) {
+                        return m_traits->sqrtFunction(args[0]->Evaluate());
+                    },
+                    [this](const std::vector<std::unique_ptr<_ExprNode>>& args) {
+                        return m_traits->powFunction(args[0]->Evaluate(), args[1]->Evaluate());
+                    },
+                    [this](const std::vector<std::unique_ptr<_ExprNode>>& args) {
+                        return m_traits->sinFunction(args[0]->Evaluate());
+                    },
+                    [this](const std::vector<std::unique_ptr<_ExprNode>>& args) {
+                        return m_traits->cosFunction(args[0]->Evaluate());
+                    },
+                    [this](const std::vector<std::unique_ptr<_ExprNode>>& args) {
+                        return m_traits->tanFunction(args[0]->Evaluate());
+                    },
+                    m_traits->cotFunction ? // has cotangent function
+                        std::function<Real(const std::vector<std::unique_ptr<_ExprNode>>&)>(
+                        [this](const std::vector<std::unique_ptr<_ExprNode>>& args) {
+                            return m_traits->cotFunction(args[0]->Evaluate());
+                        }) : // otherwise use cot = 1 / tan
+                        std::function<Real(const std::vector<std::unique_ptr<_ExprNode>>&)>(
+                        [this](const std::vector<std::unique_ptr<_ExprNode>>& args) {
+                            return Real(1) / m_traits->tanFunction(args[0]->Evaluate());
+                        }),
+                    [this](const std::vector<std::unique_ptr<_ExprNode>>& args) {
+                        return m_traits->lnFunction(args[0]->Evaluate());
+                    },
+
+                    [](const std::vector<std::unique_ptr<_ExprNode>>& args) { // avg
+                        Real accumulation = 0;
+                        for (const std::unique_ptr<_ExprNode>& ptr : args) {
+                            accumulation += ptr->Evaluate();
+                        }
+                        return accumulation / Real(args.size());
+                    }
+                };
+            }
+
+            const std::function<Real(const std::vector<std::unique_ptr<_ExprNode>>&)> _GetFunction(Token::ID id) const {
+                return m_functionMap[id - Token::SQRT];
+            }
+
+        private:
             static Real _UnaryPlus(const Real& x) { return x; }
             static Real _UnaryMinus(const Real& x) { return -x; }
-
-            static Real _Plus    (const Real& x, const Real& y) { return x + y; }
-            static Real _Minus   (const Real& x, const Real& y) { return x - y; }
-            static Real _Multiply(const Real& x, const Real& y) { return x * y; }
-            static Real _Divide  (const Real& x, const Real& y) { return x / y; }
-
-            static Real _Sqrt(const std::vector<std::unique_ptr<_ExprNode>>& args) {
-                return Traits::s_SqrtFunction(args[0]->Evaluate());
-            }
 
         private:
             size_t                                       m_index          = 0ull;
             size_t                                       m_implicitIndex  = 0ull;
+            const Traits*                                m_traits         = nullptr;
             const std::vector<Token>*                    m_tokens         = nullptr;
             const std::vector<std::pair<size_t, Token>>* m_implicitTokens = nullptr;
 
@@ -603,16 +749,8 @@ namespace core {
                 { Token::MINUS, _UnaryMinus }
             };
 
-            std::map<Token::ID, Real(*)(const Real&, const Real&)> m_binaryFunctionMap = {
-                { Token::PLUS,     _Plus },
-                { Token::MINUS,    _Minus },
-                { Token::ASTERISK, _Multiply },
-                { Token::SLASH,    _Divide }
-            };
-
-            std::map<Token::ID, Real(*)(const std::vector<std::unique_ptr<_ExprNode>>&)> m_functionMap = {
-                { Token::SQRT, _Sqrt }
-            };
+            std::map<Token::ID, std::function<Real(const Real&, const Real&)>> m_binaryFunctionMap;
+            std::vector<std::function<Real(const std::vector<std::unique_ptr<_ExprNode>>&)>> m_functionMap;
         };
 
     private:
@@ -623,7 +761,8 @@ namespace core {
             { "pi", Real(3.141592653589793) }
         };
 
-        _Builder m_builder;
+        Traits   m_traits;
+        _Builder m_builder{ m_traits };
     };
 }
 
