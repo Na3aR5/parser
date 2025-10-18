@@ -40,8 +40,10 @@ namespace core {
             IS_VALID,
             
             TWO_CONSECUTIVE_NUMBERS,
-            INVALID_OPERATOR_POSITION,
-            INVALID_PARENTHESES
+            INVALID_OPERATOR_PLACE,
+            INVALID_PARENTHESES,
+            INVALID_ARGUMENT_COUNT,
+            INVALID_COMMA_PLACE
         };
 
         template <typename T, typename ErrorT>
@@ -372,7 +374,12 @@ namespace core {
                     ++openParen;
                 }
                 else if (token.Is(Token::CLOSE_PAREN)) {
-                    if (openParen == 0) return ExpressionError::INVALID_PARENTHESES;
+                    if (openParen == 0) {
+                        return ExpressionError::INVALID_PARENTHESES;
+                    }
+                    if (prevToken->Is(Token::COMMA)) {
+                        return ExpressionError::INVALID_COMMA_PLACE;
+                    }
                     --openParen;
                 }
 
@@ -387,13 +394,18 @@ namespace core {
                 if (token.HasType(Token::BINARY) &&
                     ((prevToken->HasType(Token::UNARY) && !prevToken->HasType(Token::RIGHT_TO_LEFT)) ||
                     prevToken->info == 0 || prevToken->HasType(Token::BINARY))) {
-                    return ExpressionError::INVALID_OPERATOR_POSITION;
+                    return ExpressionError::INVALID_OPERATOR_PLACE;
                 }
                 
                 // There isn't computable left side of right-to-left unary operator
                 if (token.HasType(Token::UNARY | Token::RIGHT_TO_LEFT) &&
                     !(prevToken->Is(Token::CLOSE_PAREN) || prevToken->HasType(Token::NUMBER))) {
-                    return ExpressionError::INVALID_OPERATOR_POSITION;
+                    return ExpressionError::INVALID_OPERATOR_PLACE;
+                }
+
+                if (token.Is(Token::COMMA) && !prevToken->HasType(Token::NUMBER) &&
+                    !prevToken->Is(Token::CLOSE_PAREN)) {
+                    return ExpressionError::INVALID_COMMA_PLACE;
                 }
 
                 prevToken = &token;
@@ -412,12 +424,15 @@ namespace core {
 
             ExpressionError validateResult = Validate(tokens);
             if (validateResult != ExpressionError::IS_VALID) {
-                return Result<Real, ExpressionError>(validateResult);
+                return validateResult;
             }
             m_builder.Reset(&tokens, &implicitTokens);
 
-            std::unique_ptr<_ExprNode> root = m_builder.Build(0);
-            return Result<Real, ExpressionError>(root->Evaluate());
+            try {
+                std::unique_ptr<_ExprNode> root = m_builder.Build(0);
+                return root->Evaluate();
+            }
+            catch (ExpressionError e) { return e; }
         };
 
     private:
@@ -636,22 +651,30 @@ namespace core {
                 if (token->HasType(Token::FUNCTION)) {
                     size_t argCount = token->GetFunctionArgCount();
 
-                    {
-                        const Token* next = _Get();
-                        if (next && next->Is(Token::OPEN_PAREN)) {
-                            _Advance(); // skip open paren right after function
-                        }
-                        else {
-                            // call without parentheses for functions with 1 arg (in future)
-                        }
+                    const Token* next = _Get();
+                    if (next && next->Is(Token::OPEN_PAREN)) {
+                        _Advance(); // skip open paren right after function
                     }
+                    else {
+                        // call without parentheses for functions with 1 arg (in future)
+                    }
+
                     std::vector<std::unique_ptr<_ExprNode>> args;
                     args.reserve(argCount);
+
+                    const Token* curr = nullptr;
                     
-                    for (size_t i = 0; i < argCount; ++i) {
+                    for (size_t i = 0; i < argCount && !_Get()->Is(Token::CLOSE_PAREN); ++i) {
                         args.emplace_back(Build(0));
-                        _Advance(); // skipping commas, and ')' at the end
+
+                        curr = _Advance();
+                        next = _Get();
                     }
+
+                    if (argCount != args.size() || curr->Is(Token::COMMA)) {
+                        throw ExpressionError::INVALID_ARGUMENT_COUNT;
+                    }
+
                     return std::make_unique<_FunctionNode>(
                         _GetFunction(token->GetID()),
                         std::move(args)
